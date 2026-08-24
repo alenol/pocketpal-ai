@@ -1,0 +1,187 @@
+name: Build Android APK (Debug + logs) [v1.0.0]
+
+# ============================================================================
+# 工作流版本: 1.0.0
+# 调试构建专用，独立于 npubuild.yml（release 版），互不影响。
+# 本工作流构建 DEBUG APK：不混淆、不压缩、保留 __DEV__=true，
+# 从而「设置 → 调试 / 日志 → 复制日志」入口可见，App 启动即捕获日志。
+# ============================================================================
+#
+# 适用场景：
+#   - 真机排查「下载返回错误页」「NPU 库未加载」「多源下载失败」等问题。
+#   - 打开 App 后复现问题，到「设置 → 调试 / 日志」一键复制全部运行日志。
+#
+# 与 npubuild.yml 的区别：
+#   - 构建 assembleProdDebug（而非 assembleProdRelease）。
+#   - 不开启 shrinkResources / minify，便于断点和日志可读。
+#   - artifact 命名为 pocketpal-android-apk-debug，避免与 release 混淆。
+#   - 仍包含 Hexagon NPU 源码编译（同样支持 NPU 调试）。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'debug-v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GRADLE_OPTS: >-
+        -Dorg.gradle.daemon=false
+        -Dorg.gradle.caching=true
+        -Dorg.gradle.parallel=true
+        -Dorg.gradle.workers.max=2
+        -Xmx4g
+        -XX:MaxMetaspaceSize=1g
+      RNLLAMA_SKIP_POSTINSTALL: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 应用 HF 镜像 / 多源下载 / NPU 等源码覆盖（与 npubuild.yml 同源）。
+      # 注意文件名随版本递增：本版对应 hf-13.zip。
+      - name: Apply HF mirror source overrides
+        run: unzip -o hf-13.zip -d .
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          df -h /
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.21.0'
+          cache: yarn
+
+      # —— 下载重打包的 Hexagon SDK（调试版同样启用 NPU 编译）——
+      - name: Download repackaged Hexagon SDK (Community Edition)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/hsdk
+          gh release download v6.6.0.0 -R snapdragon-toolchain/hexagon-sdk \
+            -p 'hexagon-sdk-*-amd64-lnx.tar.xz' -D /tmp/hsdk
+          ls -la /tmp/hsdk
+
+      - name: Extract & locate Hexagon SDK roots
+        id: hsdk
+        run: |
+          mkdir -p /opt/hexagon-sdk
+          tar -xf /tmp/hsdk/*.tar.xz -C /opt/hexagon-sdk
+          TOOLS_DIR=$(find /opt/hexagon-sdk -type d -name HEXAGON_Tools 2>/dev/null | head -1)
+          if [ -z "$TOOLS_DIR" ]; then
+            echo "::error::未找到 HEXAGON_Tools 目录，压缩包内部结构可能变了。请检查 /opt/hexagon-sdk 布局。"
+            find /opt/hexagon-sdk -maxdepth 3 -type d | head -40
+            exit 1
+          fi
+          SDK_ROOT=$(dirname "$(dirname "$TOOLS_DIR")")
+          TOOLS_ROOT=$(find "$TOOLS_DIR" -maxdepth 1 -type d 2>/dev/null | tail -1)
+          echo "SDK_ROOT=$SDK_ROOT"
+          echo "TOOLS_ROOT=$TOOLS_ROOT"
+          if [ ! -d "$SDK_ROOT" ] || [ ! -d "$TOOLS_ROOT" ]; then
+            echo "::error::SDK 根目录或 HEXAGON_Tools 探测失败。"
+            find /opt/hexagon-sdk -maxdepth 3 -type d | head -40
+            exit 1
+          fi
+          {
+            echo "HEXAGON_SDK_ROOT=$SDK_ROOT"
+            echo "HEXAGON_TOOLS_ROOT=$TOOLS_ROOT"
+          } >> "$GITHUB_ENV"
+
+      - name: Create .env (HF mirror + required keys)
+        run: |
+          cat > .env <<'EOL'
+          HF_MIRROR_URL=https://hf-mirror.com
+
+          FIREBASE_FUNCTIONS_URL=
+          SUPABASE_URL=https://your-project.supabase.co
+          SUPABASE_ANON_KEY=your-anon-key
+          PALSHUB_API_BASE_URL=https://palshub.ai
+          APP_URL=pocketpal://app
+          ENABLE_PALSHUB_INTEGRATION=true
+          ENABLE_AUTHENTICATION=true
+          ENABLE_OFFLINE_MODE=true
+          GOOGLE_IOS_CLIENT_ID=
+          GOOGLE_WEB_CLIENT_ID=
+          EOL
+
+      - name: Create stub google-services.json
+        run: |
+          cat > android/app/google-services.json <<'EOL'
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "pocketpal-mirror",
+              "storage_bucket": "pocketpal-mirror.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+                  "android_client_info": { "package_name": "com.pocketpalai" }
+                },
+                "oauth_client": [],
+                "api_key": [{ "current_key": "AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY" }],
+                "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOL
+
+      - name: Cache Gradle & NDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.gradle/build-cache-1
+            /usr/local/lib/android/sdk/ndk
+          key: ${{ runner.os }}-gradle-ndk-npu-debug-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-ndk-npu-debug-
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      # DEBUG 构建：assembleProdDebug。
+      # 该变体默认 __DEV__=true、不混淆，因此：
+      #   - App.tsx 的 installLogger() 会捕获控制台与异常日志；
+      #   - SettingsScreen 的「调试 / 日志 → 复制日志」入口可见。
+      # 保留 -PrnllamaBuildFromSource=true 以编译 Hexagon NPU 后端。
+      - name: Build APK (prodDebug, with Hexagon, debuggable)
+        working-directory: android
+        run: |
+          ./gradlew assembleProdDebug --no-daemon --build-cache \
+            -PreactNativeArchitectures=arm64-v8a \
+            -PrnllamaBuildFromSource=true \
+            -x lint -x test
+          echo "=== 调试构建完成（__DEV__=true，日志捕获已启用）==="
+
+      - name: Verify Hexagon libs bundled
+        run: |
+          DIR=android/app/src/main/assets/ggml-hexagon
+          if [ -d "$DIR" ] && ls "$DIR"/libggml-htp-v*.so >/dev/null 2>&1; then
+            echo "✅ NPU 库已打进 APK assets："; ls -la "$DIR"
+          else
+            echo "::error::未找到 Hexagon HTP 库（libggml-htp-v*.so）。"
+            ls -la "$DIR" 2>/dev/null || echo "(目录不存在)"
+            exit 1
+          fi
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketpal-android-apk-debug
+          path: android/app/build/outputs/apk/prod/debug/*.apk
+          if-no-files-found: error
