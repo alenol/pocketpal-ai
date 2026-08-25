@@ -44,7 +44,7 @@ jobs:
       # 应用 HF 镜像 / 多源下载 / NPU 等源码覆盖（与 npubuild.yml 同源）。
       # 注意文件名随版本递增：本版对应 hf-13.zip。
       - name: Apply HF mirror source overrides
-        run: unzip -o hf-15.zip -d .
+        run: unzip -o hf-16.zip -d .
 
       - name: Free disk space
         run: |
