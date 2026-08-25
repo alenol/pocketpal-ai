@@ -58,7 +58,7 @@ jobs:
       # 把「改好的完整源文件」解压覆盖到仓库（HF 镜像逻辑在运行时生效）。
       # hf-10.zip 需随本仓库一起提交在根目录（每改一版文件名 +1，如 hf-11.zip）。
       - name: Apply HF mirror source overrides
-        run: unzip -o hf-12.zip -d .
+        run: unzip -o hf-16.zip -d .
 
       - name: Free disk space
         run: |
