@@ -56,9 +56,14 @@ jobs:
         uses: actions/checkout@v4
 
       # 把「改好的完整源文件」解压覆盖到仓库（HF 镜像逻辑在运行时生效）。
-      # hf-10.zip 需随本仓库一起提交在根目录（每改一版文件名 +1，如 hf-11.zip）。
+      # hf-17.zip 需随本仓库一起提交在根目录（每改一版文件名 +1，如 hf-18.zip）。
       - name: Apply HF mirror source overrides
         run: unzip -o hf-17.zip -d .
+
+      # 解压用 -o 只覆盖、不删旧文件。清理可能残留的旧版孤儿文件，
+      # 否则 Metro 打包会因 import 已删除的模块而失败（例如 HFModelSearch/ModelScopeSearch.tsx）。
+      - name: Clean orphan files from previous versions
+        run: bash delete-orphans.sh
 
       - name: Free disk space
         run: |
